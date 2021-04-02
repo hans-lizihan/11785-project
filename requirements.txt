@@ -1,0 +1,9 @@
+imageio==2.9.0
+numpy==1.20.2
+opencv-python==4.5.1.48
+Pillow==8.2.0
+scipy==1.6.2
+torch==1.8.1
+torchvision==0.9.1
+tqdm==4.59.0
+typing-extensions==3.7.4.3
