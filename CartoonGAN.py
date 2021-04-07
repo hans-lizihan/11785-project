@@ -34,6 +34,8 @@ args = parser.parse_args()
 print('------------ Options -------------')
 for k, v in sorted(vars(args).items()):
     print('%s: %s' % (str(k), str(v)))
+
+print(args)
 print('-------------- End ----------------')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
