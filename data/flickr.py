@@ -4,25 +4,11 @@ from flickrapi import FlickrAPI
 import requests
 import sys
 
-KEY = '{flikr_key_here}'
-SECRET = '{flikr_secret_here}'
+KEY = 'c7f6e255cd1b9480ce8c4597dfc2b8af'
+SECRET = '20c6f89f52aa873a'
 
 tags = [
-    'island',
-    'bar',
-    'cityscape',
-    'spain',
-    'bridge',
-    'train',
-    'tokyo',
-    'street',
-    'city',
-    'park',
-    'market',
-    'sport',
-    'portrait',
-    'crowld',
-    'viewpoint'
+    'flame'
 ]
 images_per_tag = 1000
 
@@ -111,4 +97,4 @@ start_time = time.time()
 
 download()
 
-print('Took', round(time.time() - start_time, 2), 'seconds'
+print('Took', round(time.time() - start_time, 2), 'seconds')
