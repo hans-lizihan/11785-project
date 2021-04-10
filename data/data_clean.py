@@ -21,7 +21,7 @@ def crop_center(pil_img, crop_width, crop_height):
 def crop_max_square(pil_img):
     return crop_center(pil_img, min(pil_img.size), min(pil_img.size))
 
-files = glob.glob('./data/src_data/**/*.jpg')
+files = glob.glob('./dataset/SrcDataSet/flame/*.jpg')
 
 def remove_gray_scale_images():
     for file in tqdm(files):
