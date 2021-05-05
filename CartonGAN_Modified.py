@@ -178,8 +178,7 @@ class FeatureExtractor(nn.Module):
             vgg = tvmodels.vgg19_bn(pretrained=True)
             self.feature_extractor = vgg.features[:37]
             # vgg.features[36] is conv4_4 layer, which is what original CartoonGAN used
-
-        else if network == 'resnet-101':
+        elif network == 'resnet-101':
             resnet = tvmodels.resnet101(pretrained=True)
             layers = [resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1, resnet.layer2]
             self.feature_extractor = nn.Sequential(*layers)
