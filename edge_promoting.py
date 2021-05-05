@@ -36,10 +36,12 @@ def edge_promoting_runner(list_of_files, thread_index, root, save):
             gauss_img[idx[0][i], idx[1][i], 2] = np.sum(np.multiply(
                 pad_img[idx[0][i]:idx[0][i] + kernel_size, idx[1][i]:idx[1][i] + kernel_size, 2], gauss))
 
-        result = np.concatenate((rgb_img, gauss_img), 1)
+        # result = np.concatenate((rgb_img, gauss_img), 1)
+        result = gauss_img
 
         cv2.imwrite(os.path.join(
-            save, '{}_{}.png'.format(thread_index, n)), result)
+            save, f.split('/')[-1]), gauss_img)
+
         n += 1
 
 
@@ -62,3 +64,6 @@ def edge_promoting(root, save):
 
     for p in processes:
         p.join()
+
+if __name__ == '__main__':
+    edge_promoting('dataset/TgtDataSet/Shinkai Makoto/Your Name/', 'dataset/TgtDataSet/Shinkai Makoto/Your Name_smooth')
