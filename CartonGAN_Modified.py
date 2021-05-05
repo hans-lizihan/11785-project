@@ -295,14 +295,14 @@ class CartoonGANTrainer:
             print("Training Phase [{0}/{1}], {2:.4f} seconds".format(epoch + 1, num_epochs, time.time() - start))
             self.curr_epoch += 1
 
-        # Training finished, save checkpoint
-        if not os.path.isdir('checkpoints/'):
-            os.mkdir('checkpoints/')
-        if not os.path.isdir('checkpoints/CartoonGAN/'):
-            os.mkdir('checkpoints/CartoonGAN/')
+            # Training finished, save checkpoint
+            if not os.path.isdir('checkpoints/'):
+                os.mkdir('checkpoints/')
+            if not os.path.isdir('checkpoints/CartoonGAN/'):
+                os.mkdir('checkpoints/CartoonGAN/')
 
-        self.save_checkpoint(os.path.join(save_path, 'checkpoint-epoch-{0}.ckpt'.format(num_epochs)))
-        print(f'saved to {save_path}/checkpoint-epoch-{num_epochs}.ckpt')
+            self.save_checkpoint(os.path.join(save_path, 'checkpoint-epoch-{0}.ckpt'.format(num_epochs)))
+            print(f'saved to {save_path}/checkpoint-epoch-{epoch}.ckpt')
 
         return self.loss_D_hist, self.loss_G_hist, self.loss_content_hist
 
