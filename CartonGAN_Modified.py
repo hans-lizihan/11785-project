@@ -301,7 +301,7 @@ class CartoonGANTrainer:
             if not os.path.isdir('checkpoints/CartoonGAN/'):
                 os.mkdir('checkpoints/CartoonGAN/')
 
-            self.save_checkpoint(os.path.join(save_path, 'checkpoint-epoch-{0}.ckpt'.format(num_epochs)))
+            self.save_checkpoint(os.path.join(save_path, 'checkpoint-epoch-{0}.ckpt'.format(epoch)))
             print(f'saved to {save_path}/checkpoint-epoch-{epoch}.ckpt')
 
         return self.loss_D_hist, self.loss_G_hist, self.loss_content_hist
