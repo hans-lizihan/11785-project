@@ -193,7 +193,7 @@ class FeatureExtractor(nn.Module):
 
 class CartoonGANTrainer:
     def __init__(self, generator, discriminator, feature_extractor,
-                 photo_image_loader, animation_image_loader, edge_smoothed_image_loader,
+                 photo_image_loader, animation_image_loader, edge_smoothed_image_loader, test_images_loader,
                  content_loss_weight=Config.content_loss_weight, lsgan=False):
         """
 
@@ -213,6 +213,7 @@ class CartoonGANTrainer:
         self.photo_image_loader = photo_image_loader
         self.animation_image_loader = animation_image_loader
         self.edge_smoothed_image_loader = edge_smoothed_image_loader
+        self.test_images_loader = test_images_loader
 
         self.gen_optimizer = optim.Adam(self.generator.parameters(), lr=Config.lr, betas=(Config.adam_beta1, 0.999))
         self.disc_optimizer = optim.Adam(self.discriminator.parameters(), lr=Config.lr,
@@ -303,6 +304,13 @@ class CartoonGANTrainer:
 
             self.save_checkpoint(os.path.join(save_path, 'checkpoint-epoch-{0}.ckpt'.format(epoch)))
             print(f'saved to {save_path}/checkpoint-epoch-{epoch}.ckpt')
+
+            if not os.path.isdir('generated_images/CartoonGAN'):
+                os.makedirs('generated_images/CartoonGAN/')
+
+            print("Generating Images")
+            # generate new images for all images in args.test_image_path, and save them to generated_images/CartoonGAN/ directory
+            generate_and_save_images(self.generator, self.test_images_loader, 'generated_images/CartoonGAN/', epoch)
 
         return self.loss_D_hist, self.loss_G_hist, self.loss_content_hist
 
@@ -471,7 +479,7 @@ def load_generator(generator, checkpoint_path):
     generator.load_state_dict(checkpoint['generator_state_dict'])
 
 
-def generate_and_save_images(generator, test_image_loader, save_path):
+def generate_and_save_images(generator, test_image_loader, save_path, epoch=None):
     # for each image in test_image_loader, generate image and save
     generator.eval()
     torch_to_image = transforms.Compose([
@@ -488,7 +496,8 @@ def generate_and_save_images(generator, test_image_loader, save_path):
             for i in range(len(generated_images)):
                 image = generated_images[i]
                 image = torch_to_image(image)
-                image.save(os.path.join(save_path, '{0}.jpg'.format(image_ix)))
+                filename = f'{image_ix}_e{epoch}.jpg' if epoch else f'{image_ix}.jpg'
+                image.save(os.path.join(save_path, filename))
                 image_ix += 1
 
 
@@ -512,16 +521,6 @@ def main():
 
         test_images = load_image_dataloader(root_dir=args.test_image_path, batch_size=1, shuffle=False)
 
-        print("Generating sample images")
-        image_batch, _ = next(iter(test_images))
-        image_batch = image_batch.to(Config.device)
-
-        with torch.no_grad():
-            new_images = generator(image_batch).detach().cpu()
-
-        tvutils.save_image(image_batch, 'test_images.jpg', nrow=4, padding=2, normalize=True, range=(-1, 1))
-        tvutils.save_image(new_images, 'generated_images.jpg', nrow=4, padding=2, normalize=True, range=(-1, 1))
-
         if not os.path.isdir('generated_images/CartoonGAN'):
             os.makedirs('generated_images/CartoonGAN/')
 
@@ -540,10 +539,11 @@ def main():
         photo_images = load_image_dataloader(root_dir=args.photo_image_dir, batch_size=args.batch_size, num_training_image=args.num_training_image)
         animation_images = load_image_dataloader(root_dir=args.animation_image_dir, batch_size=args.batch_size)
         edge_smoothed_images = load_image_dataloader(root_dir=args.edge_smoothed_image_dir, batch_size=args.batch_size)
+        test_images = load_image_dataloader(root_dir=args.test_image_path, batch_size=1, shuffle=False)
 
         print("Loading Trainer...")
         trainer = CartoonGANTrainer(generator, discriminator, feature_extractor, photo_images, animation_images,
-                                    edge_smoothed_images, lsgan=args.use_modified_model)
+                                    edge_smoothed_images, test_images, lsgan=args.use_modified_model)
         if args.model_path:
             trainer.load_checkpoint(args.model_path)
 
