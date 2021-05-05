@@ -451,7 +451,7 @@ def get_args():
                         help="Use this argument to use modified model")
 
     parser.add_argument('--num_training_image',
-                        action=int,
+                        type=int,
                         default=Config.num_training_image,
                         help="Training image number")
 
