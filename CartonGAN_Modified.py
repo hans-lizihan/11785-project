@@ -315,6 +315,8 @@ class CartoonGANTrainer:
         return self.loss_D_hist, self.loss_G_hist, self.loss_content_hist
 
     def train_step(self, animation_images, edge_smoothed_images, photo_images):
+        self.generator.train()
+        self.discriminator.train()
         self.discriminator.zero_grad()
         self.generator.zero_grad()
 
