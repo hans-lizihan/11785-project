@@ -16,13 +16,13 @@ import time
 class Config:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # dataloader.py
-    batch_size = 8
+    batch_size = 64
     num_workers = os.cpu_count()
     photo_image_dir = "dataset/SrcDataSet/"
     animation_image_dir = "dataset/TgtDataSet/Shinkai Makoto/Your Name/"
     edge_smoothed_image_dir = "dataset/TgtDataSet/Shinkai Makoto/Your Name_smooth/"
     test_photo_image_dir = "data/test/"
-    num_train_data = 5000
+    num_train_image = 5000
 
     # CartoonGAN_train.py
     adam_beta1 = 0.5  # following dcgan
@@ -40,7 +40,7 @@ transform = transforms.Compose([
     transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 ])
 
-def load_image_dataloader(root_dir, batch_size=Config.batch_size, num_workers=Config.num_workers, shuffle=True):
+def load_image_dataloader(root_dir, batch_size=Config.batch_size, num_workers=Config.num_workers, shuffle=True, num_training_image=Config.num_training_image):
     """
     :param root_dir: directory that contains another directory of images. All images should be under root_dir/<some_dir>/
     :param batch_size: batch size
@@ -51,7 +51,8 @@ def load_image_dataloader(root_dir, batch_size=Config.batch_size, num_workers=Co
     assert os.path.isdir(root_dir)
 
     image_dataset = datasets.ImageFolder(root=root_dir, transform=transform)
-    dataset = torch.utils.data.Subset(image_dataset, numpy.random.choice(len(image_dataset), min(Config.num_train_data, len(image_dataset)), replace=False))
+    dataset = torch.utils.data.Subset(image_dataset, numpy.random.choice(len(image_dataset), min(num_training_image, len(image_dataset)), replace=False))
+    print(f'Loaded dataset for {root_dir}, total data length: {len(dataset)}')
     dataloader = DataLoader(dataset,
                             shuffle=shuffle,
                             batch_size=batch_size,
@@ -171,16 +172,17 @@ class FeatureExtractor(nn.Module):
         # however, there exist much better convolutional networks than vgg, and we may experiment with them
         # possible models may be vgg, resnet, etc
         super().__init__()
-        assert network in ['vgg']
+        assert network in ['vgg', 'resnet-101']
 
         if network == 'vgg':
             vgg = tvmodels.vgg19_bn(pretrained=True)
             self.feature_extractor = vgg.features[:37]
             # vgg.features[36] is conv4_4 layer, which is what original CartoonGAN used
 
-        else:
-            # TODO
-            pass
+        else if network == 'resnet-101':
+            resnet = tvmodels.resnet101(pretrained=True)
+            layers = [resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1, resnet.layer2]
+            self.feature_extractor = nn.Sequential(*layers)
 
         # FeatureExtractor should not be trained
         for child in self.feature_extractor.children():
@@ -448,6 +450,11 @@ def get_args():
                         action='store_true',
                         help="Use this argument to use modified model")
 
+    parser.add_argument('--num_training_image',
+                        action=int,
+                        default=Config.num_training_image,
+                        help="Training image number")
+
     args = parser.parse_args()
 
     return args
@@ -530,7 +537,7 @@ def main():
         feature_extractor = FeatureExtractor().to(device)
 
         # load dataloaders
-        photo_images = load_image_dataloader(root_dir=args.photo_image_dir, batch_size=args.batch_size)
+        photo_images = load_image_dataloader(root_dir=args.photo_image_dir, batch_size=args.batch_size, num_training_image=args.num_training_image)
         animation_images = load_image_dataloader(root_dir=args.animation_image_dir, batch_size=args.batch_size)
         edge_smoothed_images = load_image_dataloader(root_dir=args.edge_smoothed_image_dir, batch_size=args.batch_size)
 
