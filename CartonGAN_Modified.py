@@ -22,7 +22,7 @@ class Config:
     animation_image_dir = "dataset/TgtDataSet/Shinkai Makoto/Your Name/"
     edge_smoothed_image_dir = "dataset/TgtDataSet/Shinkai Makoto/Your Name_smooth/"
     test_photo_image_dir = "data/test/"
-    num_train_image = 5000
+    num_training_image = 5000
 
     # CartoonGAN_train.py
     adam_beta1 = 0.5  # following dcgan
