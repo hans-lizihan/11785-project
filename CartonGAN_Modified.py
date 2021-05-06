@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import numpy
+import numpy as np
 import torchvision.models as tvmodels
 from torchvision import datasets, transforms
 import torchvision.utils as tvutils
@@ -51,7 +51,7 @@ def load_image_dataloader(root_dir, batch_size=Config.batch_size, num_workers=Co
     assert os.path.isdir(root_dir)
 
     image_dataset = datasets.ImageFolder(root=root_dir, transform=transform)
-    dataset = torch.utils.data.Subset(image_dataset, numpy.random.choice(len(image_dataset), min(num_training_image, len(image_dataset)), replace=False))
+    dataset = torch.utils.data.Subset(image_dataset, np.random.choice(len(image_dataset), min(num_training_image, len(image_dataset)), replace=False))
     print(f'Loaded dataset for {root_dir}, total data length: {len(dataset)}')
     dataloader = DataLoader(dataset,
                             shuffle=shuffle,
