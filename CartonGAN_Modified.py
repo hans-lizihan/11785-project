@@ -496,8 +496,7 @@ def generate_and_save_images(generator, test_image_loader, save_path, epoch=None
             generated_images = generator(test_images).detach().cpu()
 
             for i in range(len(generated_images)):
-                image = np.concatenate((test_images[i].detach().cpu(), generated_images[i]), 1)
-                image = torch_to_image(image)
+                image = torch_to_image(generated_images[i])
                 filename = f'{image_ix}_e{epoch}.jpg' if epoch else f'{image_ix}.jpg'
                 image.save(os.path.join(save_path, filename))
                 image_ix += 1
