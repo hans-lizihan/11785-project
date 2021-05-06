@@ -66,4 +66,4 @@ def edge_promoting(root, save):
         p.join()
 
 if __name__ == '__main__':
-    edge_promoting('dataset/TgtDataSet/Kimetsu no Yaiba/', 'dataset/TgtDataSet/Kimetsu no Yaiba_smooth/')
+    edge_promoting('dataset/TgtDataSet/One-Punch Man/', 'dataset/TgtDataSet/One-Punch Man_smooth/')
