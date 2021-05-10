@@ -11,6 +11,7 @@ import os
 from torch.utils.data import DataLoader, Dataset
 from torchvision.datasets.folder import pil_loader
 import glob
+from shutil import copyfile
 import time
 
 class Config:
@@ -50,8 +51,9 @@ def load_image_dataloader(root_dir, batch_size=Config.batch_size, num_workers=Co
     """
     assert os.path.isdir(root_dir)
 
-    image_dataset = datasets.ImageFolder(root=root_dir, transform=transform)
-    dataset = torch.utils.data.Subset(image_dataset, np.random.choice(len(image_dataset), min(num_training_image, len(image_dataset)), replace=False))
+    dataset = datasets.ImageFolder(root=root_dir, transform=transform)
+    if len(dataset) > num_training_image:
+        dataset = torch.utils.data.Subset(dataset, np.random.choice(len(dataset), min(num_training_image, len(dataset)), replace=False))
     print(f'Loaded dataset for {root_dir}, total data length: {len(dataset)}')
     dataloader = DataLoader(dataset,
                             shuffle=shuffle,
@@ -497,7 +499,9 @@ def generate_and_save_images(generator, test_image_loader, save_path, epoch=None
 
             for i in range(len(generated_images)):
                 image = torch_to_image(generated_images[i])
-                filename = f'{image_ix}_e{epoch}.jpg' if epoch else f'{image_ix}.jpg'
+                filename = test_image_loader.dataset.samples[image_ix][0].split('/')[-1].replace('.jpg', '')
+                copyfile(test_image_loader.dataset.samples[image_ix][0], os.path.join(save_path, f'{filename}.jpg'))
+                filename = f'{filename}_e{epoch}.jpg' if epoch else f'{filename}_generated.jpg'
                 image.save(os.path.join(save_path, filename))
                 image_ix += 1
 
