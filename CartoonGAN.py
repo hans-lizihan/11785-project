@@ -1,274 +1,567 @@
-import os, time, pickle, argparse, networks, utils
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-import matplotlib.pyplot as plt
-from torchvision import transforms
-from edge_promoting import edge_promoting
+import numpy as np
+import torchvision.models as tvmodels
+from torchvision import datasets, transforms
+import torchvision.utils as tvutils
+import argparse
+import os
+from torch.utils.data import DataLoader, Dataset
+from torchvision.datasets.folder import pil_loader
+import glob
+from shutil import copyfile
+import time
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--name', required=False, default='project_name',  help='')
-parser.add_argument('--src_data', required=False, default='src_data_path',  help='sec data path')
-parser.add_argument('--tgt_data', required=False, default='tgt_data_path',  help='tgt data path')
-parser.add_argument('--vgg_model', required=False, default='pre_trained_VGG19_model_path/vgg19.pth', help='pre-trained VGG19 model path')
-parser.add_argument('--in_ngc', type=int, default=3, help='input channel for generator')
-parser.add_argument('--out_ngc', type=int, default=3, help='output channel for generator')
-parser.add_argument('--in_ndc', type=int, default=3, help='input channel for discriminator')
-parser.add_argument('--out_ndc', type=int, default=1, help='output channel for discriminator')
-parser.add_argument('--batch_size', type=int, default=8, help='batch size')
-parser.add_argument('--ngf', type=int, default=64)
-parser.add_argument('--ndf', type=int, default=32)
-parser.add_argument('--nb', type=int, default=8, help='the number of resnet block layer for generator')
-parser.add_argument('--input_size', type=int, default=256, help='input size')
-parser.add_argument('--train_epoch', type=int, default=100)
-parser.add_argument('--pre_train_epoch', type=int, default=10)
-parser.add_argument('--lrD', type=float, default=0.0002, help='learning rate, default=0.0002')
-parser.add_argument('--lrG', type=float, default=0.0002, help='learning rate, default=0.0002')
-parser.add_argument('--con_lambda', type=float, default=10, help='lambda for content loss')
-parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for Adam optimizer')
-parser.add_argument('--beta2', type=float, default=0.999, help='beta2 for Adam optimizer')
-parser.add_argument('--latest_generator_model', required=False, default='', help='the latest trained model path')
-parser.add_argument('--latest_discriminator_model', required=False, default='', help='the latest trained model path')
-args = parser.parse_args()
+class Config:
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # dataloader.py
+    batch_size = 64
+    num_workers = os.cpu_count()
+    photo_image_dir = "dataset/SrcDataSet/"
+    animation_image_dir = "dataset/TgtDataSet/Shinkai Makoto/Your Name/"
+    edge_smoothed_image_dir = "dataset/TgtDataSet/Shinkai Makoto/Your Name_smooth/"
+    test_photo_image_dir = "dataset/test/"
+    num_training_image = 5000
 
-print('------------ Options -------------')
-for k, v in sorted(vars(args).items()):
-    print('%s: %s' % (str(k), str(v)))
+    # CartoonGAN_train.py
+    adam_beta1 = 0.5  # following dcgan
+    lr = 0.0002
+    num_epochs = 100
+    initialization_epochs = 10
+    content_loss_weight = 10
+    print_every = 100
 
-print(args)
-print('-------------- End ----------------')
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-if torch.backends.cudnn.enabled:
-    torch.backends.cudnn.benchmark = True
-
-# results save path
-if not os.path.isdir(os.path.join(args.name + '_results', 'Reconstruction')):
-    os.makedirs(os.path.join(args.name + '_results', 'Reconstruction'))
-if not os.path.isdir(os.path.join(args.name + '_results', 'Transfer')):
-    os.makedirs(os.path.join(args.name + '_results', 'Transfer'))
-
-# edge-promoting
-if not os.path.isdir(os.path.join('data', args.tgt_data, 'pair')):
-    print('edge-promoting start!!')
-    edge_promoting(os.path.join('data', args.tgt_data, 'train'), os.path.join('data', args.tgt_data, 'pair'))
-else:
-    print('edge-promoting already done')
-
-# data_loader
-src_transform = transforms.Compose([
-        transforms.Resize((args.input_size, args.input_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+# transforms that will be applied to all datasets
+transform = transforms.Compose([
+    # resizing and center cropping is not needed since we already did those using preprocessing.py
+    transforms.ToTensor(),
+    # normalize tensor that each element is in range [-1, 1]
+    transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 ])
-tgt_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
-])
-train_loader_src = utils.data_load(os.path.join('data', args.src_data), 'train', src_transform, args.batch_size, shuffle=True, drop_last=True)
-train_loader_tgt = utils.data_load(os.path.join('data', args.tgt_data), 'pair', tgt_transform, args.batch_size, shuffle=True, drop_last=True)
-test_loader_src = utils.data_load(os.path.join('data', args.src_data), 'test', src_transform, 1, shuffle=True, drop_last=True)
 
-# network
-G = networks.generator(args.in_ngc, args.out_ngc, args.ngf, args.nb)
-if args.latest_generator_model != '':
-    if torch.cuda.is_available():
-        G.load_state_dict(torch.load(args.latest_generator_model))
-    else:
-        # cpu mode
-        G.load_state_dict(torch.load(args.latest_generator_model, map_location=lambda storage, loc: storage))
+def load_image_dataloader(root_dir, batch_size=Config.batch_size, num_workers=Config.num_workers, shuffle=True, num_training_image=Config.num_training_image):
+    """
+    :param root_dir: directory that contains another directory of images. All images should be under root_dir/<some_dir>/
+    :param batch_size: batch size
+    :param num_workers: number of workers for torch.utils.data.DataLoader
+    :param shuffle: use shuffle
+    :return: torch.utils.Dataloader object
+    """
+    assert os.path.isdir(root_dir)
 
-D = networks.discriminator(args.in_ndc, args.out_ndc, args.ndf)
-if args.latest_discriminator_model != '':
-    if torch.cuda.is_available():
-        D.load_state_dict(torch.load(args.latest_discriminator_model))
-    else:
-        D.load_state_dict(torch.load(args.latest_discriminator_model, map_location=lambda storage, loc: storage))
-VGG = networks.VGG19(init_weights=args.vgg_model, feature_mode=True)
-G.to(device)
-D.to(device)
-VGG.to(device)
-G.train()
-D.train()
-VGG.eval()
-print('---------- Networks initialized -------------')
-utils.print_network(G)
-utils.print_network(D)
-utils.print_network(VGG)
-print('-----------------------------------------------')
+    dataset = datasets.ImageFolder(root=root_dir, transform=transform)
+    if len(dataset) > num_training_image:
+        dataset = torch.utils.data.Subset(dataset, np.random.choice(len(dataset), min(num_training_image, len(dataset)), replace=False))
+    print(f'Loaded dataset for {root_dir}, total data length: {len(dataset)}')
+    dataloader = DataLoader(dataset,
+                            shuffle=shuffle,
+                            batch_size=batch_size,
+                            num_workers=num_workers)
 
-# loss
-BCE_loss = nn.BCELoss().to(device)
-L1_loss = nn.L1Loss().to(device)
+    return dataloader
 
-# Adam optimizer
-G_optimizer = optim.Adam(G.parameters(), lr=args.lrG, betas=(args.beta1, args.beta2))
-D_optimizer = optim.Adam(D.parameters(), lr=args.lrD, betas=(args.beta1, args.beta2))
-G_scheduler = optim.lr_scheduler.MultiStepLR(optimizer=G_optimizer, milestones=[args.train_epoch // 2, args.train_epoch // 4 * 3], gamma=0.1)
-D_scheduler = optim.lr_scheduler.MultiStepLR(optimizer=D_optimizer, milestones=[args.train_epoch // 2, args.train_epoch // 4 * 3], gamma=0.1)
 
-pre_train_hist = {}
-pre_train_hist['Recon_loss'] = []
-pre_train_hist['per_epoch_time'] = []
-pre_train_hist['total_time'] = []
+class ResidualBlock(nn.Module):
+    def __init__(self, channels=256, use_bias=False, use_modified_model=False):
+        super().__init__()
 
-""" Pre-train reconstruction """
-if args.latest_generator_model == '':
-    print('Pre-training start!')
-    start_time = time.time()
-    for epoch in range(args.pre_train_epoch):
-        epoch_start_time = time.time()
-        Recon_losses = []
-        for x, _ in train_loader_src:
-            x = x.to(device)
+        norm = nn.InstanceNorm2d if use_modified_model else nn.BatchNorm2d
+        activation = nn.LeakyReLU if use_modified_model else nn.ReLU
 
-            # train generator G
-            G_optimizer.zero_grad()
+        self.model = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            norm(channels),
+            activation(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            norm(channels)
+        )
 
-            x_feature = VGG((x + 1) / 2)
-            G_ = G(x)
-            G_feature = VGG((G_ + 1) / 2)
+    def forward(self, input):
+        residual = input
+        x = self.model(input)
+        # element-wise sum
+        out = x + residual
 
-            Recon_loss = 10 * L1_loss(G_feature, x_feature.detach())
-            Recon_losses.append(Recon_loss.item())
-            pre_train_hist['Recon_loss'].append(Recon_loss.item())
+        return out
 
-            Recon_loss.backward()
-            G_optimizer.step()
 
-        per_epoch_time = time.time() - epoch_start_time
-        pre_train_hist['per_epoch_time'].append(per_epoch_time)
-        print('[%d/%d] - time: %.2f, Recon loss: %.3f' % ((epoch + 1), args.pre_train_epoch, per_epoch_time, torch.mean(torch.FloatTensor(Recon_losses))))
+class Generator(nn.Module):
+    def __init__(self, n_res_block=8, use_bias=False, use_modified_model=False):
+        super().__init__()
 
-    total_time = time.time() - start_time
-    pre_train_hist['total_time'].append(total_time)
-    with open(os.path.join(args.name + '_results',  'pre_train_hist.pkl'), 'wb') as f:
-        pickle.dump(pre_train_hist, f)
+        norm = nn.InstanceNorm2d if use_modified_model else nn.BatchNorm2d
+        activation = nn.LeakyReLU if use_modified_model else nn.ReLU
+        # down sampling, or layers before residual blocks
+        self.down_sampling = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=7, stride=1, padding=3, bias=use_bias),
+            norm(64),
+            activation(inplace=True),
 
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=use_bias),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            norm(128),
+            activation(inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=use_bias),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            norm(256),
+            activation(inplace=True)
+        )
+
+        # res_blocks
+        res_blocks = []
+        for i in range(n_res_block):
+            res_blocks.append(ResidualBlock(channels=256, use_bias=use_bias, use_modified_model=use_modified_model))
+        self.res_blocks = nn.Sequential(*res_blocks)
+
+        # up sapling, or layers after residual blocks
+        self.up_sampling = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1, bias=use_bias),
+            nn.ConvTranspose2d(128, 128, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            norm(128),
+            activation(inplace=True),
+
+            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1, bias=use_bias),
+            nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            norm(64),
+            activation(inplace=True),
+
+            nn.Conv2d(64, 3, kernel_size=7, stride=1, padding=3, bias=use_bias),
+            nn.Tanh()
+        )
+
+    def forward(self, input):
+        x = self.down_sampling(input)
+        x = self.res_blocks(x)
+        out = self.up_sampling(x)
+        return out
+
+
+class Discriminator(nn.Module):
+    def __init__(self, leaky_relu_negative_slope=0.2, use_bias=False):
+        super().__init__()
+
+        self.negative_slope = leaky_relu_negative_slope
+        self.layers = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            nn.LeakyReLU(self.negative_slope, inplace=True),
+
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, bias=use_bias),
+            nn.LeakyReLU(self.negative_slope, inplace=True),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(self.negative_slope, inplace=True),
+
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=use_bias),
+            nn.LeakyReLU(self.negative_slope, inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(self.negative_slope, inplace=True),
+
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1, bias=use_bias),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(self.negative_slope, inplace=True),
+
+            nn.Conv2d(256, 1, kernel_size=3, stride=1, padding=1, bias=use_bias)
+
+        )
+
+    def forward(self, input):
+        output = self.layers(input)
+        return output
+
+
+class FeatureExtractor(nn.Module):
+    def __init__(self, network='vgg'):
+        # in original paper, authors used vgg.
+        # however, there exist much better convolutional networks than vgg, and we may experiment with them
+        # possible models may be vgg, resnet, etc
+        super().__init__()
+        assert network in ['vgg', 'resnet-101']
+
+        if network == 'vgg':
+            vgg = tvmodels.vgg19_bn(pretrained=True)
+            self.feature_extractor = vgg.features[:37]
+            # vgg.features[36] is conv4_4 layer, which is what original CartoonGAN used
+        elif network == 'resnet-101':
+            resnet = tvmodels.resnet101(pretrained=True)
+            layers = [resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1, resnet.layer2]
+            self.feature_extractor = nn.Sequential(*layers)
+
+        # FeatureExtractor should not be trained
+        for child in self.feature_extractor.children():
+            for param in child.parameters():
+                param.requires_grad = False
+
+    def forward(self, input):
+        return self.feature_extractor(input)
+
+class CartoonGANTrainer:
+    def __init__(self, generator, discriminator, feature_extractor,
+                 photo_image_loader, animation_image_loader, edge_smoothed_image_loader, test_images_loader,
+                 content_loss_weight=Config.content_loss_weight, lsgan=False):
+        """
+
+        :param generator: CartoonGAN generator
+        :param discriminator: CartoonGAN discriminator
+        :param feature_extractor: feature extractor, VGG in CartoonGAN
+        :param photo_image_loader:
+        :param animation_image_loader:
+        :param edge_smoothed_image_loader:
+        """
+
+        # just in case our generator and discriminator are not using Config.device
+        self.generator = generator.to(Config.device)
+        self.discriminator = discriminator.to(Config.device)
+        self.feature_extractor = feature_extractor.to(Config.device)
+
+        self.photo_image_loader = photo_image_loader
+        self.animation_image_loader = animation_image_loader
+        self.edge_smoothed_image_loader = edge_smoothed_image_loader
+        self.test_images_loader = test_images_loader
+
+        self.gen_optimizer = optim.Adam(self.generator.parameters(), lr=Config.lr, betas=(Config.adam_beta1, 0.999))
+        self.disc_optimizer = optim.Adam(self.discriminator.parameters(), lr=Config.lr,
+                                         betas=(Config.adam_beta1, 0.999))
+        if not lsgan:
+            self.disc_criterion = nn.BCEWithLogitsLoss().to(Config.device)  # for discriminator GAN loss
+            self.gen_criterion_gan = nn.BCEWithLogitsLoss().to(Config.device)  # for generator GAN loss
+        else:
+            # use Least Square GAN
+            self.disc_criterion = nn.MSELoss().to(Config.device)
+            self.gen_criterion_gan = nn.MSELoss().to(Config.device)
+        self.gen_criterion_content = nn.L1Loss().to(Config.device)  # for generator content loss
+        self.content_loss_weight = content_loss_weight
+
+        self.curr_initialization_epoch = 0
+        self.curr_epoch = 0
+
+        self.init_loss_hist = []
+        self.loss_D_hist = []
+        self.loss_G_hist = []
+        self.loss_content_hist = []
+        self.print_every = Config.print_every
+
+    def train(self, num_epochs=Config.num_epochs, initialization_epochs=Config.initialization_epochs,
+              save_path='checkpoints/CartoonGAN/'):
+        # if not initialized, do it!
+        if self.curr_initialization_epoch < initialization_epochs:
+            for init_epoch in range(self.curr_initialization_epoch, initialization_epochs):
+                start = time.time()
+                epoch_loss = 0
+
+                for ix, (photo_images, _) in enumerate(self.photo_image_loader, 0):
+                    photo_images = photo_images.to(Config.device)
+
+                    loss = self.initialize_step(photo_images)
+                    self.init_loss_hist.append(loss)
+                    epoch_loss += loss
+
+                    # print progress
+                    if (ix + 1) % self.print_every == 0:
+                        print("Initialization Phase Epoch {0} Iteration {1}: Content Loss: {2:.4f}".format(init_epoch+1,
+                                                                                                           ix + 1,
+                                                                                                           epoch_loss / (ix + 1)))
+
+                print("Initialization Phase [{0}/{1}], {2:.4f} seconds".format(init_epoch + 1, initialization_epochs,
+                                                                             time.time() - start))
+                self.curr_initialization_epoch += 1
+
+        for epoch in range(self.curr_epoch, num_epochs):
+            start = time.time()
+            epoch_loss_D = 0
+            epoch_loss_G = 0
+            epoch_loss_content = 0
+
+            for ix, ((animation_images, _), (edge_smoothed_images, _), (photo_images, _)) in enumerate(
+                    zip(self.animation_image_loader,
+                        self.edge_smoothed_image_loader,
+                        self.photo_image_loader), 0):
+                # do train_step...!
+                animation_images = animation_images.to(Config.device)
+                edge_smoothed_images = edge_smoothed_images.to(Config.device)
+                photo_images = photo_images.to(Config.device)
+
+                loss_D, loss_G, loss_content = self.train_step(animation_images, edge_smoothed_images, photo_images)
+                epoch_loss_D += loss_D
+                epoch_loss_G += loss_G
+                epoch_loss_content += loss_content
+
+                self.loss_D_hist.append(loss_D)
+                self.loss_G_hist.append(loss_G)
+                self.loss_content_hist.append(loss_content)
+
+                if (ix + 1) % self.print_every == 0:
+                    print("Training Phase Epoch {0} Iteration {1}, loss_D: {2:.4f}, "
+                          "loss_G: {3:.4f}, loss_content: {4:.4f}".format(epoch + 1, ix + 1, epoch_loss_D / (ix + 1),
+                                                                          epoch_loss_G / (ix + 1),
+                                                                          epoch_loss_content / (ix + 1)))
+
+            # end of epoch
+            print("Training Phase [{0}/{1}], {2:.4f} seconds".format(epoch + 1, num_epochs, time.time() - start))
+            self.curr_epoch += 1
+
+            # Training finished, save checkpoint
+            if not os.path.isdir('checkpoints/'):
+                os.mkdir('checkpoints/')
+            if not os.path.isdir('checkpoints/CartoonGAN/'):
+                os.mkdir('checkpoints/CartoonGAN/')
+
+            self.save_checkpoint(os.path.join(save_path, 'checkpoint-epoch-{0}.ckpt'.format(epoch)))
+            print(f'saved to {save_path}/checkpoint-epoch-{epoch}.ckpt')
+
+            if not os.path.isdir('generated_images/CartoonGAN'):
+                os.makedirs('generated_images/CartoonGAN/')
+
+            print("Generating Images")
+            # generate new images for all images in args.test_image_path, and save them to generated_images/CartoonGAN/ directory
+            generate_and_save_images(self.generator, self.test_images_loader, 'generated_images/CartoonGAN/', epoch)
+
+        return self.loss_D_hist, self.loss_G_hist, self.loss_content_hist
+
+    def train_step(self, animation_images, edge_smoothed_images, photo_images):
+        self.generator.train()
+        self.discriminator.train()
+        self.discriminator.zero_grad()
+        self.generator.zero_grad()
+
+        loss_D = 0
+        loss_G = 0
+        loss_content = 0
+
+        # 1. Train Discriminator
+        # 1-1. Train Discriminator using animation images
+        animation_disc_output = self.discriminator(animation_images)
+        animation_target = torch.ones_like(animation_disc_output)
+        loss_real = self.disc_criterion(animation_disc_output, animation_target)
+
+        # 1-2. Train Discriminator using edge smoothed images
+        edge_smoothed_disc_output = self.discriminator(edge_smoothed_images)
+        edge_smoothed_target = torch.zeros_like(edge_smoothed_disc_output)
+        loss_edge = self.disc_criterion(edge_smoothed_disc_output, edge_smoothed_target)
+
+        # 1-3. Train Discriminator using generated images
+        generated_images = self.generator(photo_images).detach()
+
+        generated_output = self.discriminator(generated_images)
+        generated_target = torch.zeros_like(generated_output)
+        loss_generated = self.disc_criterion(generated_output, generated_target)
+
+        loss_disc = loss_real + loss_edge + loss_generated
+
+        loss_disc.backward()
+        loss_D = loss_disc.item()
+
+        self.disc_optimizer.step()
+
+        # 2. Train Generator
+        self.generator.zero_grad()
+
+        # 2-1. Train Generator using adversarial loss, using generated images
+        generated_images = self.generator(photo_images)
+
+        generated_output = self.discriminator(generated_images)
+        generated_target = torch.ones_like(generated_output)
+        loss_adv = self.gen_criterion_gan(generated_output, generated_target)
+
+        # 2-2. Train Generator using content loss
+        x_features = self.feature_extractor((photo_images + 1) / 2).detach()
+        Gx_features = self.feature_extractor((generated_images + 1) / 2)
+
+        loss_content = self.content_loss_weight * self.gen_criterion_content(Gx_features, x_features)
+
+        loss_gen = loss_adv + loss_content
+        loss_gen.backward()
+
+        loss_G = loss_adv.item()
+        loss_content = loss_content.item()
+
+        self.gen_optimizer.step()
+
+        return loss_D, loss_G, loss_content
+
+    def initialize_step(self, photo_images):
+        self.generator.zero_grad()
+        x_features = self.feature_extractor((photo_images + 1) / 2).detach()  # move [-1, 1] to [0, 1]
+        Gx = self.generator(photo_images)
+        Gx_features = self.feature_extractor((Gx + 1) / 2)  # move [-1, 1] to [0, 1]
+
+        content_loss = self.content_loss_weight * self.gen_criterion_content(Gx_features, x_features)
+        content_loss.backward()
+        self.gen_optimizer.step()
+
+        return content_loss.item()
+
+    def save_checkpoint(self, checkpoint_path):
+        torch.save({
+            'generator_state_dict': self.generator.state_dict(),
+            'discriminator_state_dict': self.discriminator.state_dict(),
+            'gen_optimizer_state_dict': self.gen_optimizer.state_dict(),
+            'disc_optimizer_state_dict': self.disc_optimizer.state_dict(),
+            'curr_epoch': self.curr_epoch,
+            'curr_initialization_epoch': self.curr_initialization_epoch,
+            'loss_G_hist': self.loss_G_hist,
+            'loss_D_hist': self.loss_D_hist,
+            'loss_content_hist': self.loss_content_hist
+        }, checkpoint_path)
+
+    def load_checkpoint(self, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        self.generator.load_state_dict(checkpoint['generator_state_dict'])
+        self.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+        self.gen_optimizer.load_state_dict(checkpoint['gen_optimizer_state_dict'])
+        self.disc_optimizer.load_state_dict(checkpoint['disc_optimizer_state_dict'])
+        self.loss_G_hist = checkpoint['loss_G_hist']
+        self.loss_D_hist = checkpoint['loss_D_hist']
+        self.loss_content_hist = checkpoint['loss_content_hist']
+        self.curr_epoch = checkpoint['curr_epoch']
+        self.curr_initialization_epoch = checkpoint['curr_initialization_epoch']
+
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--test',
+                        action='store_true',
+                        help='Use this argument to test generator')
+
+    parser.add_argument('--model_path',
+                        help='Path to saved model')
+
+    parser.add_argument('--model_save_path',
+                        default='checkpoints/CartoonGAN/',
+                        help='Path to save trained model')
+
+    parser.add_argument("--photo_image_dir",
+                        default=Config.photo_image_dir,
+                        help="Path to photo images")
+
+    parser.add_argument("--animation_image_dir",
+                        default=Config.animation_image_dir,
+                        help="Path to animation images")
+
+    parser.add_argument("--edge_smoothed_image_dir",
+                        default=Config.edge_smoothed_image_dir,
+                        help="Path to edge smoothed animation images")
+
+    parser.add_argument('--test_image_path',
+                        default=Config.test_photo_image_dir,
+                        help='Path to test photo images')
+
+    parser.add_argument('--initialization_epochs',
+                        type=int,
+                        default=Config.initialization_epochs,
+                        help='Number of epochs for initialization phase')
+
+    parser.add_argument('--num_epochs',
+                        type=int,
+                        default=Config.num_epochs,
+                        help='Number of training epochs')
+
+    parser.add_argument("--batch_size",
+                        type=int,
+                        default=Config.batch_size)
+
+    parser.add_argument('--use_modified_model',
+                        action='store_true',
+                        help="Use this argument to use modified model")
+
+    parser.add_argument('--num_training_image',
+                        type=int,
+                        default=Config.num_training_image,
+                        help="Training image number")
+
+    args = parser.parse_args()
+
+    return args
+
+
+def load_model(generator, discriminator, checkpoint_path):
+    checkpoint = torch.load(checkpoint_path)
+    generator.load_state_dict(checkpoint['generator_state_dict'])
+    discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+
+
+def load_generator(generator, checkpoint_path):
+    checkpoint = torch.load(checkpoint_path, map_location=Config.device)
+    generator.load_state_dict(checkpoint['generator_state_dict'])
+
+
+def generate_and_save_images(generator, test_image_loader, save_path, epoch=None):
+    # for each image in test_image_loader, generate image and save
+    generator.eval()
+    torch_to_image = transforms.Compose([
+        transforms.Normalize(mean=(-1, -1, -1), std=(2, 2, 2)),  # [-1, 1] to [0, 1]
+        transforms.ToPILImage()
+    ])
+
+    image_ix = 0
     with torch.no_grad():
-        G.eval()
-        for n, (x, _) in enumerate(train_loader_src):
-            x = x.to(device)
-            G_recon = G(x)
-            result = torch.cat((x[0], G_recon[0]), 2)
-            path = os.path.join(args.name + '_results', 'Reconstruction', args.name + '_train_recon_' + str(n + 1) + '.png')
-            plt.imsave(path, (result.cpu().numpy().transpose(1, 2, 0) + 1) / 2)
-            if n == 4:
-                break
+        for test_images, _ in test_image_loader:
+            test_images = test_images.to(Config.device)
+            generated_images = generator(test_images).detach().cpu()
 
-        for n, (x, _) in enumerate(test_loader_src):
-            x = x.to(device)
-            G_recon = G(x)
-            result = torch.cat((x[0], G_recon[0]), 2)
-            path = os.path.join(args.name + '_results', 'Reconstruction', args.name + '_test_recon_' + str(n + 1) + '.png')
-            plt.imsave(path, (result.cpu().numpy().transpose(1, 2, 0) + 1) / 2)
-            if n == 4:
-                break
-else:
-    print('Load the latest generator model, no need to pre-train')
+            for i in range(len(generated_images)):
+                image = torch_to_image(generated_images[i])
+                filename = test_image_loader.dataset.samples[image_ix][0].split('/')[-1].replace('.jpg', '')
+                copyfile(test_image_loader.dataset.samples[image_ix][0], os.path.join(save_path, f'{filename}.jpg'))
+                filename = f'{filename}_e{epoch}.jpg' if epoch else f'{filename}_generated.jpg'
+                image.save(os.path.join(save_path, filename))
+                image_ix += 1
 
 
-train_hist = {}
-train_hist['Disc_loss'] = []
-train_hist['Gen_loss'] = []
-train_hist['Con_loss'] = []
-train_hist['per_epoch_time'] = []
-train_hist['total_time'] = []
-print('training start!')
-start_time = time.time()
-real = torch.ones(args.batch_size, 1, args.input_size // 4, args.input_size // 4).to(device)
-fake = torch.zeros(args.batch_size, 1, args.input_size // 4, args.input_size // 4).to(device)
-for epoch in range(args.train_epoch):
-    epoch_start_time = time.time()
-    G.train()
-    G_scheduler.step()
-    D_scheduler.step()
-    Disc_losses = []
-    Gen_losses = []
-    Con_losses = []
-    for (x, _), (y, _) in zip(train_loader_src, train_loader_tgt):
-        e = y[:, :, :, args.input_size:]
-        y = y[:, :, :, :args.input_size]
-        x, y, e = x.to(device), y.to(device), e.to(device)
+def main():
 
-        # train D
-        D_optimizer.zero_grad()
+    args = get_args()
 
-        D_real = D(y)
-        D_real_loss = BCE_loss(D_real, real)
+    device = Config.device
+    print("PyTorch running with device {0}".format(device))
 
-        G_ = G(x)
-        D_fake = D(G_)
-        D_fake_loss = BCE_loss(D_fake, fake)
+    print("Creating models...")
+    generator = Generator(use_modified_model=args.use_modified_model).to(device)
 
-        D_edge = D(e)
-        D_edge_loss = BCE_loss(D_edge, fake)
+    if args.test:
+        assert args.model_path, 'model_path must be provided for testing'
+        print('Testing...')
+        generator.eval()
 
-        Disc_loss = D_real_loss + D_fake_loss + D_edge_loss
-        Disc_losses.append(Disc_loss.item())
-        train_hist['Disc_loss'].append(Disc_loss.item())
+        print('Loading models...')
+        load_generator(generator, args.model_path)
 
-        Disc_loss.backward()
-        D_optimizer.step()
+        test_images = load_image_dataloader(root_dir=args.test_image_path, batch_size=1, shuffle=False)
 
-        # train G
-        G_optimizer.zero_grad()
+        if not os.path.isdir('generated_images/CartoonGAN'):
+            os.makedirs('generated_images/CartoonGAN/')
 
-        G_ = G(x)
-        D_fake = D(G_)
-        D_fake_loss = BCE_loss(D_fake, real)
+        print("Generating Images")
+        # generate new images for all images in args.test_image_path, and save them to generated_images/CartoonGAN/ directory
+        generate_and_save_images(generator, test_images, 'generated_images/CartoonGAN/')
 
-        x_feature = VGG((x + 1) / 2)
-        G_feature = VGG((G_ + 1) / 2)
-        Con_loss = args.con_lambda * L1_loss(G_feature, x_feature.detach())
+    else:
+        print("Training...")
 
-        Gen_loss = D_fake_loss + Con_loss
-        Gen_losses.append(D_fake_loss.item())
-        train_hist['Gen_loss'].append(D_fake_loss.item())
-        Con_losses.append(Con_loss.item())
-        train_hist['Con_loss'].append(Con_loss.item())
+        print("Loading Discriminator and Feature Extractor...")
+        discriminator = Discriminator().to(device)
+        feature_extractor = FeatureExtractor().to(device)
 
-        Gen_loss.backward()
-        G_optimizer.step()
+        # load dataloaders
+        photo_images = load_image_dataloader(root_dir=args.photo_image_dir, batch_size=args.batch_size, num_training_image=args.num_training_image)
+        animation_images = load_image_dataloader(root_dir=args.animation_image_dir, batch_size=args.batch_size)
+        edge_smoothed_images = load_image_dataloader(root_dir=args.edge_smoothed_image_dir, batch_size=args.batch_size)
+        test_images = load_image_dataloader(root_dir=args.test_image_path, batch_size=1, shuffle=False)
+
+        print("Loading Trainer...")
+        trainer = CartoonGANTrainer(generator, discriminator, feature_extractor, photo_images, animation_images,
+                                    edge_smoothed_images, test_images, lsgan=args.use_modified_model)
+        if args.model_path:
+            trainer.load_checkpoint(args.model_path)
+
+        print('Start Training...')
+        loss_D_hist, loss_G_hist, loss_content_hist = trainer.train(num_epochs=args.num_epochs,
+                                                                    initialization_epochs=args.initialization_epochs,
+                                                                    save_path=args.model_save_path)
 
 
-    per_epoch_time = time.time() - epoch_start_time
-    train_hist['per_epoch_time'].append(per_epoch_time)
-    print(
-    '[%d/%d] - time: %.2f, Disc loss: %.3f, Gen loss: %.3f, Con loss: %.3f' % ((epoch + 1), args.train_epoch, per_epoch_time, torch.mean(torch.FloatTensor(Disc_losses)),
-        torch.mean(torch.FloatTensor(Gen_losses)), torch.mean(torch.FloatTensor(Con_losses))))
-
-    if epoch % 2 == 1 or epoch == args.train_epoch - 1:
-        with torch.no_grad():
-            G.eval()
-            for n, (x, _) in enumerate(train_loader_src):
-                x = x.to(device)
-                G_recon = G(x)
-                result = torch.cat((x[0], G_recon[0]), 2)
-                path = os.path.join(args.name + '_results', 'Transfer', str(epoch+1) + '_epoch_' + args.name + '_train_' + str(n + 1) + '.png')
-                plt.imsave(path, (result.cpu().numpy().transpose(1, 2, 0) + 1) / 2)
-                if n == 4:
-                    break
-
-            for n, (x, _) in enumerate(test_loader_src):
-                x = x.to(device)
-                G_recon = G(x)
-                result = torch.cat((x[0], G_recon[0]), 2)
-                path = os.path.join(args.name + '_results', 'Transfer', str(epoch+1) + '_epoch_' + args.name + '_test_' + str(n + 1) + '.png')
-                plt.imsave(path, (result.cpu().numpy().transpose(1, 2, 0) + 1) / 2)
-                if n == 4:
-                    break
-
-            torch.save(G.state_dict(), os.path.join(args.name + '_results', 'generator_latest.pkl'))
-            torch.save(D.state_dict(), os.path.join(args.name + '_results', 'discriminator_latest.pkl'))
-
-total_time = time.time() - start_time
-train_hist['total_time'].append(total_time)
-
-print("Avg one epoch time: %.2f, total %d epochs time: %.2f" % (torch.mean(torch.FloatTensor(train_hist['per_epoch_time'])), args.train_epoch, total_time))
-print("Training finish!... save training results")
-
-torch.save(G.state_dict(), os.path.join(args.name + '_results',  'generator_param.pkl'))
-torch.save(D.state_dict(), os.path.join(args.name + '_results',  'discriminator_param.pkl'))
-with open(os.path.join(args.name + '_results',  'train_hist.pkl'), 'wb') as f:
-    pickle.dump(train_hist, f)
+if __name__ == '__main__':
+    main()
