@@ -64,11 +64,11 @@ def load_image_dataloader(root_dir, batch_size=Config.batch_size, num_workers=Co
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels=256, use_bias=False, use_modified_model=False):
+    def __init__(self, channels=256, use_bias=False, use_instance_norm=False, use_leaky_relu=False):
         super().__init__()
 
-        norm = nn.InstanceNorm2d if use_modified_model else nn.BatchNorm2d
-        activation = nn.LeakyReLU if use_modified_model else nn.ReLU
+        norm = nn.InstanceNorm2d if use_instance_norm else nn.BatchNorm2d
+        activation = nn.LeakyReLU if use_leaky_relu else nn.ReLU
 
         self.model = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1, bias=use_bias),
@@ -88,11 +88,11 @@ class ResidualBlock(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, n_res_block=8, use_bias=False, use_modified_model=False):
+    def __init__(self, n_res_block=8, use_bias=False, use_leaky_relu=False, use_instance_norm=False):
         super().__init__()
 
-        norm = nn.InstanceNorm2d if use_modified_model else nn.BatchNorm2d
-        activation = nn.LeakyReLU if use_modified_model else nn.ReLU
+        norm = nn.InstanceNorm2d if use_instance_norm else nn.BatchNorm2d
+        activation = nn.LeakyReLU if use_leaky_relu else nn.ReLU
         # down sampling, or layers before residual blocks
         self.down_sampling = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=7, stride=1, padding=3, bias=use_bias),
@@ -113,7 +113,7 @@ class Generator(nn.Module):
         # res_blocks
         res_blocks = []
         for i in range(n_res_block):
-            res_blocks.append(ResidualBlock(channels=256, use_bias=use_bias, use_modified_model=use_modified_model))
+            res_blocks.append(ResidualBlock(channels=256, use_bias=use_bias, use_instance_norm=use_instance_norm, use_leaky_relu=use_leaky_relu))
         self.res_blocks = nn.Sequential(*res_blocks)
 
         # up sapling, or layers after residual blocks
@@ -179,13 +179,13 @@ class FeatureExtractor(nn.Module):
         # however, there exist much better convolutional networks than vgg, and we may experiment with them
         # possible models may be vgg, resnet, etc
         super().__init__()
-        assert network in ['vgg', 'resnet-101']
+        assert network in ['vgg', 'resnet']
 
         if network == 'vgg':
             vgg = tvmodels.vgg19_bn(pretrained=True)
             self.feature_extractor = vgg.features[:37]
             # vgg.features[36] is conv4_4 layer, which is what original CartoonGAN used
-        elif network == 'resnet-101':
+        elif network == 'resnet':
             resnet = tvmodels.resnet101(pretrained=True)
             layers = [resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1, resnet.layer2]
             self.feature_extractor = nn.Sequential(*layers)
@@ -199,9 +199,15 @@ class FeatureExtractor(nn.Module):
         return self.feature_extractor(input)
 
 class CartoonGANTrainer:
-    def __init__(self, generator, discriminator, feature_extractor,
-                 photo_image_loader, animation_image_loader, edge_smoothed_image_loader, test_images_loader,
-                 content_loss_weight=Config.content_loss_weight, lsgan=False):
+    def __init__(
+        self,
+        generator,
+        discriminator,
+        feature_extractor,
+        photo_image_loader, animation_image_loader, edge_smoothed_image_loader, test_images_loader,
+        content_loss_weight=Config.content_loss_weight,
+        use_lsgan=False,
+    ):
         """
 
         :param generator: CartoonGAN generator
@@ -225,7 +231,7 @@ class CartoonGANTrainer:
         self.gen_optimizer = optim.Adam(self.generator.parameters(), lr=Config.lr, betas=(Config.adam_beta1, 0.999))
         self.disc_optimizer = optim.Adam(self.discriminator.parameters(), lr=Config.lr,
                                          betas=(Config.adam_beta1, 0.999))
-        if not lsgan:
+        if not use_lsgan:
             self.disc_criterion = nn.BCEWithLogitsLoss().to(Config.device)  # for discriminator GAN loss
             self.gen_criterion_gan = nn.BCEWithLogitsLoss().to(Config.device)  # for generator GAN loss
         else:
@@ -463,9 +469,21 @@ def get_args():
                         type=int,
                         default=Config.batch_size)
 
-    parser.add_argument('--use_modified_model',
+    parser.add_argument('--use_resnet',
                         action='store_true',
-                        help="Use this argument to use modified model")
+                        help="Use reset net instead of VGG")
+
+    parser.add_argument('--use_leaky_relu',
+                        action='store_true',
+                        help="Use leaky_relu in the generator")
+
+    parser.add_argument('--use_lsgan',
+                        action='store_true',
+                        help="Use lsgan instead of gan")
+
+    parser.add_argument('--use_instance_norm',
+                        action='store_true',
+                        help="Use instance norm")
 
     parser.add_argument('--num_training_image',
                         type=int,
@@ -519,7 +537,7 @@ def main():
     print("PyTorch running with device {0}".format(device))
 
     print("Creating models...")
-    generator = Generator(use_modified_model=args.use_modified_model).to(device)
+    generator = Generator(use_leaky_relu=args.use_leaky_relu, use_instance_norm=args.use_instance_norm).to(device)
 
     if args.test:
         assert args.model_path, 'model_path must be provided for testing'
@@ -543,7 +561,7 @@ def main():
 
         print("Loading Discriminator and Feature Extractor...")
         discriminator = Discriminator().to(device)
-        feature_extractor = FeatureExtractor().to(device)
+        feature_extractor = FeatureExtractor(network='resnet' if args.use_resnet else 'vgg').to(device)
 
         # load dataloaders
         photo_images = load_image_dataloader(root_dir=args.photo_image_dir, batch_size=args.batch_size, num_training_image=args.num_training_image)
@@ -552,8 +570,16 @@ def main():
         test_images = load_image_dataloader(root_dir=args.test_image_path, batch_size=1, shuffle=False)
 
         print("Loading Trainer...")
-        trainer = CartoonGANTrainer(generator, discriminator, feature_extractor, photo_images, animation_images,
-                                    edge_smoothed_images, test_images, lsgan=args.use_modified_model)
+        trainer = CartoonGANTrainer(
+            generator,
+            discriminator,
+            feature_extractor,
+            photo_images,
+            animation_images,
+            edge_smoothed_images,
+            test_images,
+            use_lsgan=args.use_lsgan,
+        )
         if args.model_path:
             trainer.load_checkpoint(args.model_path)
 
